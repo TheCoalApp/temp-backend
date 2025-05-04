@@ -1,0 +1,1 @@
+{"root":["./src/gemini.ts","./src/index.ts","./src/podcast.ts","./src/prisma.ts","./src/queue.ts","./src/socket.ts","./src/types.ts","./src/routes/aiRouter.ts","./src/routes/mainRouter.ts","./src/routes/notesRouter.ts","./src/routes/syncRouter.ts"],"version":"5.6.3"}

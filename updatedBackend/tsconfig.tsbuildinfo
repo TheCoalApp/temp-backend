@@ -1,0 +1,1 @@
+{"root":["./unlock.ts","./src/index.ts","./src/queue.ts","./src/socket.ts","./src/types.ts","./src/routes/mainRouter.ts","./src/routes/notesRouter.ts","./src/routes/syncRouter.ts"],"errors":true,"version":"5.7.2"}

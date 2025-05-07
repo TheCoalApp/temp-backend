@@ -2,10 +2,11 @@ import express, { Request, Response } from "express";
 import { body, param, header, validationResult } from "express-validator";
 import { newNoteSchema } from "../types";
 import { PrismaClient } from "@prisma/client";
-import { deleteEvent, pushToQueue, redisClient } from "../queue";
-import { connectClients, wss } from "../socket";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import { generateEmbedding, generateRAGResponse, generateSummary } from "../gemini";
+import { getSimilarNotes, insertEmbedding, updateEmbedding } from "@prisma/client/sql";
+import { v4 as uuidv4 } from 'uuid';
 
 // Extend Express Request type to include user
 interface AuthRequest extends Request {
@@ -86,7 +87,6 @@ notesRouter.post("/register", [
 
 // Create a new note
 notesRouter.post("/newnote", authenticateToken, [
-  body("platform").trim().notEmpty().withMessage("Platform is required").isString().withMessage("Platform must be a string"),
   body("noteTitle").trim().notEmpty().withMessage("Note title is required").isString().withMessage("Note title must be a string").isLength({ max: 100 }).withMessage("Note title must be at most 100 characters"),
   body("noteDescription").trim().notEmpty().withMessage("Note description is required").isString().withMessage("Note description must be a string"),
   body("tag").optional().trim().isString().withMessage("Tag must be a string").isLength({ max: 50 }).withMessage("Tag must be at most 50 characters"),
@@ -104,7 +104,7 @@ notesRouter.post("/newnote", authenticateToken, [
       });
     }
 
-    const { platform, noteTitle, noteDescription, tag } = parsedBody.data;
+    const { noteTitle, noteDescription, tag } = parsedBody.data;
 
     const result = await prisma.note.create({
       data: {
@@ -116,19 +116,13 @@ notesRouter.post("/newnote", authenticateToken, [
       },
     });
 
-    pushToQueue("CREATE", platform, result.id, noteTitle, noteDescription);
+    const getEmbedding = await generateEmbedding(noteDescription);
+    const embedding = `[${getEmbedding.embedding.values}]`;
 
-    const message = JSON.stringify({ type: "sync" });
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        const clientId = connectClients.get(client);
-        if (clientId !== currClientId) {
-          client.send(message);
-        }
-      }
-    });
+    await prisma.$queryRawTyped(insertEmbedding(uuidv4(), result.id, embedding));
 
     return res.status(201).json(result);
+    
   } catch (error) {
     console.error("Error creating new note:", error);
     return res.status(500).json({
@@ -158,12 +152,6 @@ notesRouter.get("/allnotes", authenticateToken, async (req: AuthRequest, res: Re
       message: "An unexpected error occurred while retrieving the notes.",
     });
   }
-});
-
-// Test route (unprotected for debugging)
-notesRouter.get("/test", (req: Request, res: Response) => {
-  console.log("Hit /test");
-  res.status(200).json({ message: "Test route works" });
 });
 
 // Get timestamps (user-specific)
@@ -234,6 +222,11 @@ notesRouter.put(
         },
       });
 
+      const getEmbedding = await generateEmbedding(noteDescription);
+      const embedding = `[${getEmbedding.embedding.values}]`;
+  
+      await prisma.$queryRawTyped(updateEmbedding(embedding, id));
+
       return res.status(200).json({
         message: "Note updated successfully",
         updatedNote,
@@ -287,18 +280,6 @@ notesRouter.delete("/deletenote/:id", authenticateToken, [
     // Proceed with deletion
     const deletedNote = await prisma.note.delete({
       where: { id },
-    });
-
-    deleteEvent("DELETE", platform, deletedNote.id);
-
-    const message = JSON.stringify({ type: "sync" });
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        const clientId = connectClients.get(client);
-        if (clientId !== currClientId) {
-          client.send(message);
-        }
-      }
     });
 
     return res.status(200).json({
@@ -418,3 +399,75 @@ notesRouter.stack.forEach((r: any) => {
     console.log(r.route.path);
   }
 });
+
+
+
+
+notesRouter.post("/summarize/:id", 
+  authenticateToken, 
+  [
+    param("id")
+      .notEmpty().withMessage("Note ID is required")
+      .isString().withMessage("Note ID must be a string"),
+    validate
+  ],
+  async (req: Request, res: Response) => {
+  const { id } = req.params;
+  
+  const note = await prisma.note.findUnique({
+      where: {
+          id: id
+      }
+  });
+
+  if (!note) {
+      return res.status(404).json({ error: "Note not found" });
+  }
+
+  const summarizedNote = await generateSummary(note.noteDescription);
+
+  res.json({
+      summary: summarizedNote.response.text()
+  });
+})
+
+
+notesRouter.post("/ask",
+  authenticateToken,
+  [
+    body("question")
+      .trim().notEmpty().withMessage("A question is required")
+      .isString().withMessage("The question must be a string"),
+    validate
+  ],
+  async (req: Request, res: Response) => {
+  const { question } = req.body;
+
+  if (!question) {
+      return res.status(400).json({ error: "Question is required" });
+  }
+
+  const questionEmbedding = await generateEmbedding(question);
+  const similarNotes = await prisma.$queryRawTyped(getSimilarNotes(`[${questionEmbedding.embedding.values.join(",")}]`));
+  const context = getContextFromNotes(similarNotes);
+
+  const RAGresponse = await generateRAGResponse(question, context);
+
+
+  res.status(200).json({
+      response: RAGresponse.response.text()
+  });
+
+})
+
+
+
+
+// helper functions
+
+function getContextFromNotes(notes: any[]) {
+  if (!notes || notes.length === 0) {
+      return "No relevant information found.";
+  }
+  return notes.map(note => note.noteDescription).join("\n");
+}

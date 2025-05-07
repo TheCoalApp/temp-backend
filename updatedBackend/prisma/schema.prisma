@@ -1,10 +1,13 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions", "typedSql"]
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector")]  // Add the pgvector extension
+
 }
 
 model User {
@@ -27,4 +30,16 @@ model Note {
   lockedBy        String?
   userId          String
   user            User     @relation(fields: [userId], references: [id])
+  embedding       Embedding?
+  podcastPath     String?
 }
+
+model Embedding {
+  id                  String                            @id @default(uuid())
+  noteId              String                            @unique
+  embedding           Unsupported("vector(768)")?
+  createdAt           DateTime                          @default(now())
+  note                Note                              @relation(fields: [id], references: [id])
+}
+
+
